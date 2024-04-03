@@ -1,21 +1,21 @@
 # condacolab
 
-[![Downloads](https://pepy.tech/badge/condacolab/week)](https://pypi.org/project/condacolab)
+<!-- [![Downloads](https://pepy.tech/badge/condacolab/week)](https://pypi.org/project/condacolab)
 [![Downloads](https://pepy.tech/badge/condacolab/month)](https://pypi.org/project/condacolab)
-[![Downloads](https://pepy.tech/badge/condacolab)](https://pypi.org/project/condacolab)
+[![Downloads](https://pepy.tech/badge/condacolab)](https://pypi.org/project/condacolab) -->
 
 Install Conda and friends on Google Colab, easily.
 
 ![CondaColab](https://github.com/jaimergp/condacolab/raw/main/condacolab.png)
 
-## Usage
+> ⚠️ **Note**: This README refers to the development version of `condacolab`. If you are looking for the stable version, please check the [`0.1.x` branch](https://github.com/conda-incubator/condacolab/tree/0.1.x).
 
-> **TLDR**: Check the [example notebook here](https://colab.research.google.com/drive/1c_RGCgQeLHVXlF44LyOFjfUW32CmG6BP)!
+## Basic usage
 
 On your Colab notebook, run the following code as the _first executable cell_:
 
 ```python
-!pip install -q condacolab
+!pip install -q "https://github.com/conda-incubator/condacolab/archive/main.zip"
 import condacolab
 condacolab.install()
 ```
