@@ -258,11 +258,21 @@ def install_from_url(
     if sha256 is not None:
         digest = _chunked_sha256(installer_fn)
         assert digest == sha256, f"💥💔💥 Checksum failed! Expected {sha256}, got {digest}"
-
-    condacolab_task = _run_subprocess(
+        
+    print("📦 Installing...")
+    task = run(
         ["bash", installer_fn, "-bfp", str(prefix)],
-        "condacolab_install.log",
-        )
+        check=False,
+        stdout=PIPE,
+        stderr=STDOUT,
+        text=True,
+    )
+    os.unlink(installer_fn)
+    with open("condacolab_install.log", "w") as f:
+        f.write(task.stdout)
+    assert (
+        task.returncode == 0
+    ), "💥💔💥 The installation failed! Logs are available at `/content/condacolab_install.log`."
 
     print("📌 Adjusting configuration...")
     cuda_version = ".".join(os.environ.get("CUDA_VERSION", "*.*.*").split(".")[:2])
