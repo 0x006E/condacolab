@@ -259,8 +259,7 @@ def install_from_url(
         digest = _chunked_sha256(installer_fn)
         assert digest == sha256, f"💥💔💥 Checksum failed! Expected {sha256}, got {digest}"
 
-    print("📦 Installing...")
-    task = run(
+    condacolab_task = _run_subprocess(
         ["bash", installer_fn, "-bfp", str(prefix)],
         "condacolab_install.log",
         )
