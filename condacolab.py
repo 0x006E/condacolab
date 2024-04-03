@@ -15,15 +15,22 @@ import os
 import sys
 import shutil
 from datetime import datetime, timedelta
+from distutils.spawn import find_executable
 from pathlib import Path
 from subprocess import check_output, run, PIPE, STDOUT
 from textwrap import dedent
-from typing import Dict, AnyStr
+from typing import Dict, AnyStr, Iterable
 from urllib.request import urlopen
-from distutils.spawn import find_executable
-from IPython.display import display
+from urllib.error import HTTPError
 
+from IPython.display import display
 from IPython import get_ipython
+
+try:
+    from ruamel.yaml import YAML
+    from ruamel.yaml.comments import CommentedMap
+except ImportError as e:
+    raise RuntimeError("Could not find ruamel.yaml, plese install using `!pip install ruamel.yaml`!") from e
 
 try:
     import ipywidgets as widgets
@@ -37,8 +44,31 @@ except ImportError:
     raise RuntimeError("This module must ONLY run as part of a Colab notebook!")
 
 
-__version__ = "0.1.8"
-__author__ = "Jaime Rodríguez-Guerra <jaimergp@users.noreply.github.com>"
+__version__ = "0.1.4"
+__author__ = (
+    "Jaime Rodríguez-Guerra <jaimergp@users.noreply.github.com>, "
+    "Surbhi Sharma <ssurbhi560@users.noreply.github.com>"
+)
+
+yaml=YAML()
+
+PREFIX = "/opt/conda"
+
+if HAS_IPYWIDGETS:
+    restart_kernel_button = widgets.Button(description="Restart kernel now...")
+    restart_button_output = widgets.Output(layout={'border': '1px solid black'})
+else:
+    restart_kernel_button = restart_button_output = None
+
+def _on_button_clicked(b):
+  with restart_button_output:
+    get_ipython().kernel.do_shutdown(True)
+    print("Kernel restarted!")
+    restart_kernel_button.close()
+
+def _run_subprocess(command, logs_filename):
+    """
+    Run subprocess then write the logs for that process and raise errors if it fails.
 
     Parameters
     ----------
@@ -65,6 +95,103 @@ __author__ = "Jaime Rodríguez-Guerra <jaimergp@users.noreply.github.com>"
     assert (task.returncode == 0), f"💥💔💥 The installation failed! Logs are available at `{logs_file_path}/{logs_filename}`."
 
 
+def _update_environment(
+    prefix:os.PathLike = PREFIX,
+    environment_file: str = None,
+    python_version: str = None,
+    specs: Iterable[str] = (),
+    channels: Iterable[str] = (),
+    pip_args: Iterable[str] = (),
+    extra_conda_args: Iterable[str] = (),
+    conda_exe: str = "conda",
+    ):
+    """
+    Install the dependencies in conda base environment during
+    the condacolab installion.
+
+    Parameters
+    ----------
+    prefix
+        Target location for the installation.
+    environment_file
+        Path or URL of the environment.yaml file to use for
+        updating the conda base enviornment.
+    python_version
+        Python version to use in the conda base environment, eg. "3.9".
+    specs
+        List of additional specifications (packages) to install.
+    channels
+        Comma separated list of channels to use in the conda
+        base environment.
+    pip_args
+        List of additional packages to be installed using pip.
+    extra_conda_args
+        Any extra conda arguments to be used during the installation.
+    """
+    os.makedirs("/var/condacolab", exist_ok=True)
+    environment_file_path = "/var/condacolab/environment.yaml"
+
+    # When environment.yaml file is not provided.
+    if environment_file is None:
+        env_details = {}
+        if channels:
+            env_details["channels"] = channels
+        if specs:
+            env_details["dependencies"] = specs
+        if python_version:
+            env_details["dependencies"] += [f"python={python_version}"]
+        if pip_args:
+            pip_args_dict = {"pip": pip_args}
+            env_details["dependencies"].append(pip_args_dict)
+
+        with open(environment_file_path, 'w') as f:
+            yaml.indent(mapping=2, sequence=4, offset=2)
+            yaml.dump(env_details, f)
+    else:
+        # If URL is given for environment.yaml file
+        if environment_file.startswith(("http://", "https://")):
+            try:
+                with urlopen(environment_file) as response, open(environment_file_path, "wb") as out:
+                    shutil.copyfileobj(response, out)
+            except HTTPError as e:
+                raise HTTPError("The URL you entered is not working, please check it again.") from e
+
+        # If path is given for environment.yaml file
+        else:
+            shutil.copy(environment_file, environment_file_path)
+
+        with open(environment_file_path, 'r') as f:
+            env_details = yaml.load(f.read())
+
+        for key in env_details:
+            if channels and key == "channels":
+                env_details["channels"].extend(channels)
+            if key == "dependencies":
+                if specs:
+                    env_details["dependencies"].extend(specs)
+                if python_version:
+                    env_details["dependencies"].extend([f"python={python_version}"])
+                if pip_args:
+                    for element in env_details["dependencies"]:
+                        # if pip dependencies are already specified.
+                        if isinstance(element, CommentedMap) and "pip" in element:
+                            element["pip"].extend(pip_args)
+                            break
+                        # if there are no pip dependencies specified in the yaml file.
+                    else:
+                        pip_args_dict = CommentedMap([("pip", [*pip_args])])
+                        env_details["dependencies"].append(pip_args_dict)
+
+        with open(environment_file_path, 'w') as f:
+            f.truncate(0)
+            yaml.dump(env_details, f)
+
+    _run_subprocess(
+        [conda_exe, "env", "update", "-n", "base", "-f", environment_file_path, *extra_conda_args],
+        "environment_file_update.log",
+    )
+
+
 def _chunked_sha256(path, chunksize=1_048_576):
     hasher = hashlib.sha256()
     with open(path, "rb") as f:
@@ -79,6 +206,12 @@ def install_from_url(
     env: Dict[AnyStr, AnyStr] = None,
     run_checks: bool = True,
     sha256: AnyStr = None,
+    environment_file: str = None,
+    python_version: str = None,
+    specs: Iterable[str] = (),
+    channels: Iterable[str] = (),
+    pip_args: Iterable[str] = (),
+    extra_conda_args: Iterable[str] = (),
 ):
     """
     Download and run a constructor-like installer, patching
@@ -182,24 +315,38 @@ def install_from_url(
         "pip_task.log"
         )
 
+    print("📦 Updating enviornment using YAML file...")
+
+    _update_environment(
+        prefix=prefix,
+        environment_file=environment_file,
+        specs=specs,
+        channels=channels,
+        python_version=python_version,
+        pip_args=pip_args,
+        extra_conda_args=extra_conda_args,
+        conda_exe=f"{prefix}/bin/{conda_exe}",
+        )
+
     env = env or {}
     bin_path = f"{prefix}/bin"
 
-    os.rename(sys.executable, f"{sys.executable}.renamed_by_condacolab.bak")
-    with open(sys.executable, "w") as f:
-        f.write(
-            dedent(
-                f"""
-                #!/bin/bash
-                source {prefix}/etc/profile.d/conda.sh
-                conda activate
-                unset PYTHONPATH
-                mv /usr/bin/lsb_release /usr/bin/lsb_release.renamed_by_condacolab.bak
-                exec {bin_path}/python $@
-                """
-            ).lstrip()
-        )
-    run(["chmod", "+x", sys.executable])
+    if os.path.exists(sys.executable):
+        os.rename(sys.executable, f"{sys.executable}.renamed_by_condacolab.bak")
+        with open(sys.executable, "w") as f:
+            f.write(
+                dedent(
+                    f"""
+                    #!/bin/bash
+                    source {prefix}/etc/profile.d/conda.sh
+                    conda activate
+                    unset PYTHONPATH
+                    mv /usr/bin/lsb_release /usr/bin/lsb_release.renamed_by_condacolab.bak
+                    exec {bin_path}/python $@
+                    """
+                ).lstrip()
+            )
+        run(["chmod", "+x", sys.executable])
 
     taken = timedelta(seconds=round((datetime.now() - t0).total_seconds(), 0))
     print(f"⏲ Done in {taken}")
@@ -216,16 +363,26 @@ def install_from_url(
     else:
         print("🔁 Please restart kernel by clicking on Runtime > Restart runtime.")
 
+
 def install_mambaforge(
-    prefix: os.PathLike = PREFIX, env: Dict[AnyStr, AnyStr] = None, run_checks: bool = True, restart_kernel: bool = True,
+    prefix: os.PathLike = PREFIX,
+    env: Dict[AnyStr, AnyStr] = None,
+    run_checks: bool = True,
+    restart_kernel: bool = True,
+    specs: Iterable[str] = (),
+    python_version: str = None,
+    channels: Iterable[str] = (),
+    environment_file: str = None,
+    extra_conda_args: Iterable[str] = (),
+    pip_args: Iterable[str] = (),
+
 ):
     """
-    Install Mambaforge, built for Python 3.10.
-
+    Install Mambaforge, built for Python 3.7.
     Mambaforge consists of a Miniconda-like distribution optimized
     and preconfigured for conda-forge packages, and includes ``mamba``,
     a faster ``conda`` implementation.
-
+    Unlike the official Miniconda, this is built with the latest ``conda``.
     Parameters
     ----------
     prefix
@@ -238,7 +395,6 @@ def install_mambaforge(
         to add those yourself in the raw string. They will
         end up added to a line like ``exec env VAR=VALUE python3...``.
         For example, a value with spaces should be passed as::
-
             env={"VAR": '"a value with spaces"'}
     run_checks
         Run checks to see if installation was run previously.
@@ -251,15 +407,35 @@ def install_mambaforge(
     """
     installer_url = "https://github.com/conda-forge/miniforge/releases/download/23.1.0-1/Mambaforge-23.1.0-1-Linux-x86_64.sh"
     checksum = "cfb16c47dc2d115c8b114280aa605e322173f029fdb847a45348bf4bd23c62ab"
-    install_from_url(installer_url, prefix=prefix, env=env, run_checks=run_checks, sha256=checksum)
-
+    install_from_url(
+        installer_url,
+        prefix=prefix, 
+        env=env,
+        run_checks=run_checks,
+        sha256=checksum,
+        specs=specs,
+        python_version=python_version,
+        channels=channels,
+        environment_file=environment_file,
+        extra_conda_args=extra_conda_args,
+        pip_args=pip_args,
+        )
 
 # Make mambaforge the default
 install = install_mambaforge
 
 
 def install_miniforge(
-    prefix: os.PathLike = PREFIX, env: Dict[AnyStr, AnyStr] = None, run_checks: bool = True, restart_kernel: bool = True,
+    prefix: os.PathLike = PREFIX,
+    env: Dict[AnyStr, AnyStr] = None,
+    run_checks: bool = True,
+    restart_kernel: bool = True,
+    specs: Iterable[str] = (),
+    python_version: str = None,
+    channels: Iterable[str] = (),
+    environment_file: str = None,
+    extra_conda_args: Iterable[str] = (),
+    pip_args: Iterable[str] = (),
 ):
     """
     Install Miniforge, built for Python 3.10.
@@ -292,11 +468,32 @@ def install_miniforge(
     """
     installer_url = "https://github.com/conda-forge/miniforge/releases/download/23.1.0-1/Miniforge3-23.1.0-1-Linux-x86_64.sh"
     checksum = "7a5859e873ed36fc9a141fff0ac60e133b971b3413aed49a4c82693d4f4a2ad2"
-    install_from_url(installer_url, prefix=prefix, env=env, run_checks=run_checks, sha256=checksum)
+    install_from_url(
+        installer_url,
+        prefix=prefix,
+        env=env,
+        run_checks=run_checks,
+        sha256=checksum,
+        specs=specs,
+        python_version=python_version,
+        channels=channels,
+        environment_file=environment_file,
+        extra_conda_args=extra_conda_args,
+        pip_args=pip_args,
+        )
 
 
 def install_miniconda(
-    prefix: os.PathLike = PREFIX, env: Dict[AnyStr, AnyStr] = None, run_checks: bool = True, restart_kernel: bool = True,
+    prefix: os.PathLike = PREFIX,
+    env: Dict[AnyStr, AnyStr] = None,
+    run_checks: bool = True,
+    restart_kernel: bool = True,
+    specs: Iterable[str] = (),
+    python_version: str = None,
+    channels: Iterable[str] = (),
+    environment_file: str = None,
+    extra_conda_args: Iterable[str] = (),
+    pip_args: Iterable[str] = (),
 ):
     """
     Install Miniconda 23.1.0 for Python 3.10.
@@ -326,11 +523,32 @@ def install_miniconda(
     """
     installer_url = "https://repo.anaconda.com/miniconda/Miniconda3-py310_23.3.1-0-Linux-x86_64.sh"
     checksum = "aef279d6baea7f67940f16aad17ebe5f6aac97487c7c03466ff01f4819e5a651"
-    install_from_url(installer_url, prefix=prefix, env=env, run_checks=run_checks, sha256=checksum)
+    install_from_url(
+        installer_url,
+        prefix=prefix,
+        env=env,
+        run_checks=run_checks,
+        sha256=checksum,
+        specs=specs,
+        python_version=python_version,
+        channels=channels,
+        environment_file=environment_file,
+        extra_conda_args=extra_conda_args,
+        pip_args=pip_args,
+    )
 
 
 def install_anaconda(
-    prefix: os.PathLike = PREFIX, env: Dict[AnyStr, AnyStr] = None, run_checks: bool = True, restart_kernel: bool = True,
+    prefix: os.PathLike = PREFIX,
+    env: Dict[AnyStr, AnyStr] = None,
+    run_checks: bool = True,
+    restart_kernel: bool = True,
+    specs: Iterable[str] = (),
+    python_version: str = None,
+    channels: Iterable[str] = (),
+    environment_file: str = None,
+    extra_conda_args: Iterable[str] = (),
+    pip_args: Iterable[str] = (),
 ):
     """
     Install Anaconda 2023.03, the latest version built
@@ -361,7 +579,19 @@ def install_anaconda(
     """
     installer_url = "https://repo.anaconda.com/archive/Anaconda3-2023.03-1-Linux-x86_64.sh"
     checksum = "95102d7c732411f1458a20bdf47e4c1b0b6c8a21a2edfe4052ca370aaae57bab"
-    install_from_url(installer_url, prefix=prefix, env=env, run_checks=run_checks, sha256=checksum)
+    install_from_url(        
+        installer_url,
+        prefix=prefix,
+        env=env,
+        run_checks=run_checks,
+        sha256=checksum,
+        specs=specs,
+        python_version=python_version,
+        channels=channels,
+        environment_file=environment_file,
+        extra_conda_args=extra_conda_args,
+        pip_args=pip_args,
+    )
 
 
 def check(prefix: os.PathLike = PREFIX, verbose: bool = True):
@@ -378,10 +608,6 @@ def check(prefix: os.PathLike = PREFIX, verbose: bool = True):
         Print success message if True
     """
     assert find_executable("conda"), "💥💔💥 Conda not found!"
-
-    pymaj, pymin = sys.version_info[:2]
-    sitepackages = f"{prefix}/lib/python{pymaj}.{pymin}/site-packages"
-    assert sitepackages in sys.path, f"💥💔💥 PYTHONPATH was not patched! Value: {sys.path}"
     assert all(
         not path.startswith("/usr/local/") for path in sys.path
     ), f"💥💔💥 PYTHONPATH include system locations: {[path for path in sys.path if path.startswith('/usr/local')]}!"
